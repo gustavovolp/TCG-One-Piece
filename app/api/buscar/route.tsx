@@ -15,24 +15,29 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'O nome é obrigatório' }, { status: 400 });
     }
 
-    // 1. Limpeza do Nome (Remove o que estiver entre parênteses digitado pelo usuário)
     const nomeLimpoParaBusca = nome
       .replace(/\s*\(.*?\)\s*/g, " ")
       .replace(/\s+/g, " ")
       .trim();
 
-    // =========================================================================
-    // 2. MONTAGEM DA URL (APENAS O NOME)
-    // A pedido, enviamos SOMENTE o nome para o site da Liga para evitar 
-    // qualquer conflito com o motor de busca deles.
-    // =========================================================================
     const termoBuscaFinal = nomeLimpoParaBusca;
+
+    // =========================================================================
+    // DISFARCE DE ROBÔ E AJUSTE PRO DOCKER/RAILWAY
+    // =========================================================================
+    const browser = await chromium.launch({ 
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled'] 
+    });
     
-    const browser = await chromium.launch({ headless: true });
-    const context = await browser.newContext();
+    const context = await browser.newContext({
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+      extraHTTPHeaders: {
+        'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+      }
+    });
     const page = await context.newPage();
 
-    // Hack de velocidade: bloqueia imagens, mídias e css pesados
     await page.route('**/*', (route) => {
       const type = route.request().resourceType();
       if (['image', 'stylesheet', 'font', 'media'].includes(type)) {
@@ -50,10 +55,18 @@ export async function POST(request: Request) {
       const urlBusca = `https://www.ligaonepiece.com.br/?view=cards/search&card=${termoUrl}&page=${numeroPagina}`;
       await page.goto(urlBusca, { waitUntil: 'domcontentloaded' });
 
+      // =========================================================================
+      // LOG DETETIVE: Vai aparecer nos logs do Railway pra gente saber onde ele parou
+      // =========================================================================
+      const tituloPagina = await page.title();
+      console.log(`[DEBUG] Página ${numeroPagina} carregada. Título: "${tituloPagina}"`);
+
       try {
-        await page.waitForSelector('.price-min', { timeout: 2500 });
+        // Aumentamos o limite para 8 segundos para compensar a velocidade da nuvem
+        await page.waitForSelector('.price-min', { timeout: 8000 });
       } catch (e) {
-        break; // Não achou mais preços, as páginas acabaram
+        console.log(`[DEBUG] Fim das páginas ou timeout atingido na página ${numeroPagina}.`);
+        break; 
       }
 
       const mtgPrices = page.locator('.mtg-prices');
@@ -67,17 +80,10 @@ export async function POST(request: Request) {
         if (!htmlBloco) continue;
         const textoLower = htmlBloco.toLowerCase();
 
-        // =========================================================
-        // FILTRAGEM INTERNA (O NOSSO "LEÃO DE CHÁCARA")
-        // =========================================================
-        
-        // 1ª VERIFICAÇÃO: O nome base está em algum lugar do texto?
         if (!textoLower.includes(nomeLimpoParaBusca.toLowerCase())) {
           continue; 
         }
 
-        // 2ª VERIFICAÇÃO: Se o usuário digitou o código, checamos puramente no nosso back-end
-        // "OP14-084" passa em "OP14-084-SP" naturalmente
         if (codigo) {
           const codigoBuscado = codigo.toLowerCase().trim();
           if (!textoLower.includes(codigoBuscado)) {
@@ -85,14 +91,10 @@ export async function POST(request: Request) {
           }
         }
 
-        // Passou nos testes, adiciona na lista!
         listaFinal.push({ htmlRaw: htmlBloco });
       }
 
       numeroPagina++;
-      
-      // Como estamos buscando APENAS pelo nome, personagens como o Luffy 
-      // podem ter dezenas de páginas. Subi a trava para 15 por precaução.
       if (numeroPagina > 15) break; 
     }
 
