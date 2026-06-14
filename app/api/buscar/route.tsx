@@ -1,26 +1,5 @@
 import { NextResponse } from 'next/server';
-import { chromium } from 'playwright-extra';
-import StealthPlugin from 'puppeteer-extra-plugin-stealth';
-
-// CORREÇÃO 1: Ativa o disfarce apenas UMA vez, quando o servidor inicia (Fora do POST)
-chromium.use(StealthPlugin());
-
-// =========================================================================
-// FIREWALL DE SEGURANÇA (CORS)
-// =========================================================================
-// CORREÇÃO 2: Removida a barra (/) no final. O cabeçalho Origin nunca usa barra!
-const DOMINIO_PERMITIDO = 'https://tcg-one-piece-8lh6o4cd6-gustavovolps-projects.vercel.app'; 
-
-const corsHeaders = {
-  'Access-Control-Allow-Origin': DOMINIO_PERMITIDO,
-  'Access-Control-Allow-Methods': 'POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type',
-};
-
-// Rota OPTIONS é exigida pelos navegadores para liberar requisições de outros domínios
-export async function OPTIONS() {
-  return NextResponse.json({}, { headers: corsHeaders });
-}
+import { chromium } from 'playwright';
 
 interface RequisicaoBusca {
   nome: string;
@@ -29,35 +8,31 @@ interface RequisicaoBusca {
 
 export async function POST(request: Request) {
   try {
-    const origin = request.headers.get('origin') || '';
-    if (origin !== DOMINIO_PERMITIDO && origin !== 'http://localhost:3000') {
-      return NextResponse.json({ error: 'Acesso bloqueado pelo Firewall local.' }, { status: 403, headers: corsHeaders });
-    }
-
     const body: RequisicaoBusca = await request.json();
-// ... O resto do seu código continua EXATAMENTE igual daqui para baixo
     const { nome, codigo } = body;
 
     if (!nome) {
-      return NextResponse.json({ error: 'O nome é obrigatório' }, { status: 400, headers: corsHeaders });
+      return NextResponse.json({ error: 'O nome é obrigatório' }, { status: 400 });
     }
 
-    const nomeLimpoParaBusca = nome.replace(/\s*\(.*?\)\s*/g, " ").replace(/\s+/g, " ").trim();
+    // 1. Limpeza do Nome (Remove o que estiver entre parênteses digitado pelo usuário)
+    const nomeLimpoParaBusca = nome
+      .replace(/\s*\(.*?\)\s*/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
 
-    chromium.use(StealthPlugin());
-
-    const browser = await chromium.launch({ 
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled', '--disable-web-security'] 
-    });
+    // =========================================================================
+    // 2. MONTAGEM DA URL (APENAS O NOME)
+    // A pedido, enviamos SOMENTE o nome para o site da Liga para evitar 
+    // qualquer conflito com o motor de busca deles.
+    // =========================================================================
+    const termoBuscaFinal = nomeLimpoParaBusca;
     
-    const context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      locale: 'pt-BR',
-      timezoneId: 'America/Sao_Paulo',
-    });
+    const browser = await chromium.launch({ headless: true });
+    const context = await browser.newContext();
     const page = await context.newPage();
 
+    // Hack de velocidade: bloqueia imagens, mídias e css pesados
     await page.route('**/*', (route) => {
       const type = route.request().resourceType();
       if (['image', 'stylesheet', 'font', 'media'].includes(type)) {
@@ -67,7 +42,7 @@ export async function POST(request: Request) {
       }
     });
 
-    const termoUrl = encodeURIComponent(nomeLimpoParaBusca);
+    const termoUrl = encodeURIComponent(termoBuscaFinal);
     const listaFinal: { htmlRaw: string }[] = [];
     let numeroPagina = 1;
 
@@ -76,13 +51,15 @@ export async function POST(request: Request) {
       await page.goto(urlBusca, { waitUntil: 'domcontentloaded' });
 
       try {
-        await page.waitForSelector('.price-min', { timeout: 8000 });
+        await page.waitForSelector('.price-min', { timeout: 2500 });
       } catch (e) {
-        break; 
+        break; // Não achou mais preços, as páginas acabaram
       }
 
       const mtgPrices = page.locator('.mtg-prices');
-      const blocosDeCarta = await mtgPrices.evaluateAll(elements => elements.map(el => el.parentElement?.innerHTML || ""));
+      const blocosDeCarta = await mtgPrices.evaluateAll(elements => 
+        elements.map(el => el.parentElement?.innerHTML || "")
+      );
 
       if (blocosDeCarta.length === 0) break;
 
@@ -90,13 +67,32 @@ export async function POST(request: Request) {
         if (!htmlBloco) continue;
         const textoLower = htmlBloco.toLowerCase();
 
-        if (!textoLower.includes(nomeLimpoParaBusca.toLowerCase())) continue; 
-        if (codigo && !textoLower.includes(codigo.toLowerCase().trim())) continue; 
+        // =========================================================
+        // FILTRAGEM INTERNA (O NOSSO "LEÃO DE CHÁCARA")
+        // =========================================================
+        
+        // 1ª VERIFICAÇÃO: O nome base está em algum lugar do texto?
+        if (!textoLower.includes(nomeLimpoParaBusca.toLowerCase())) {
+          continue; 
+        }
 
+        // 2ª VERIFICAÇÃO: Se o usuário digitou o código, checamos puramente no nosso back-end
+        // "OP14-084" passa em "OP14-084-SP" naturalmente
+        if (codigo) {
+          const codigoBuscado = codigo.toLowerCase().trim();
+          if (!textoLower.includes(codigoBuscado)) {
+            continue; 
+          }
+        }
+
+        // Passou nos testes, adiciona na lista!
         listaFinal.push({ htmlRaw: htmlBloco });
       }
 
       numeroPagina++;
+      
+      // Como estamos buscando APENAS pelo nome, personagens como o Luffy 
+      // podem ter dezenas de páginas. Subi a trava para 15 por precaução.
       if (numeroPagina > 15) break; 
     }
 
@@ -104,8 +100,10 @@ export async function POST(request: Request) {
       return cartas.map(c => {
         const parser = new DOMParser();
         const doc = parser.parseFromString(c.htmlRaw, 'text/html');
+        
         const textoBloco = doc.body.innerText || "";
         const linhas = textoBloco.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+        
         const precoMin = doc.querySelector('.price-min')?.textContent?.trim() || "R$ --,--";
         
         const imgEl = doc.querySelector('img.main-card');
@@ -116,17 +114,17 @@ export async function POST(request: Request) {
         }
 
         const descricao = linhas.slice(0, 3).filter(l => !l.includes('R$')).join(' | ');
+
         return { descricao, preco: precoMin, imagem: urlImg };
       });
     }, listaFinal);
 
     await browser.close();
 
-    // Retorna os dados com os cabeçalhos de segurança para a Vercel aceitar
-    return NextResponse.json({ cartas: resultadosFormatados }, { headers: corsHeaders });
+    return NextResponse.json({ cartas: resultadosFormatados });
 
   } catch (error) {
     console.error(error);
-    return NextResponse.json({ error: 'Erro interno no servidor' }, { status: 500, headers: corsHeaders });
+    return NextResponse.json({ error: 'Erro interno no servidor' }, { status: 500 });
   }
 }
