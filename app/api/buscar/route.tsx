@@ -6,7 +6,7 @@ import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 // FIREWALL DE SEGURANÇA (CORS)
 // Troque esta URL pelo link real da sua Vercel quando fizer o deploy
 // =========================================================================
-const DOMINIO_PERMITIDO = 'https://tcg-one-piece-five.vercel.app'; 
+const DOMINIO_PERMITIDO = 'https://tcg-one-piece-8lh6o4cd6-gustavovolps-projects.vercel.app/'; 
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': DOMINIO_PERMITIDO,
