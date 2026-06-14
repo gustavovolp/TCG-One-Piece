@@ -31,13 +31,17 @@ export default function Home() {
     return valor.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
   };
 
+  // ... resto do código acima
   const lidarComBusca = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setCarregando(true);
     setResultados([]);
 
     try {
-      const resposta = await fetch('/api/buscar', {
+      // Usa a URL do túnel se estiver em produção, ou o caminho relativo se estiver local
+      const baseUrl = process.env.NEXT_PUBLIC_API_URL || '';
+      
+      const resposta = await fetch(`${baseUrl}/api/buscar`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ nome, codigo }),
@@ -53,6 +57,7 @@ export default function Home() {
       setCarregando(false);
     }
   };
+  // ... resto do código abaixo
 
   const adicionarAoCarrinho = (carta: Carta) => {
     const precoNum = converterPrecoParaNumero(carta.preco);
