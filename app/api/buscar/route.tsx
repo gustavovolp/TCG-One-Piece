@@ -2,11 +2,14 @@ import { NextResponse } from 'next/server';
 import { chromium } from 'playwright-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 
+// CORREÇÃO 1: Ativa o disfarce apenas UMA vez, quando o servidor inicia (Fora do POST)
+chromium.use(StealthPlugin());
+
 // =========================================================================
 // FIREWALL DE SEGURANÇA (CORS)
-// Troque esta URL pelo link real da sua Vercel quando fizer o deploy
 // =========================================================================
-const DOMINIO_PERMITIDO = 'https://tcg-one-piece-8lh6o4cd6-gustavovolps-projects.vercel.app/'; 
+// CORREÇÃO 2: Removida a barra (/) no final. O cabeçalho Origin nunca usa barra!
+const DOMINIO_PERMITIDO = 'https://tcg-one-piece-8lh6o4cd6-gustavovolps-projects.vercel.app'; 
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': DOMINIO_PERMITIDO,
@@ -26,13 +29,13 @@ interface RequisicaoBusca {
 
 export async function POST(request: Request) {
   try {
-    // Validação de segurança extra: Verifica se a origem da requisição é a sua Vercel
     const origin = request.headers.get('origin') || '';
     if (origin !== DOMINIO_PERMITIDO && origin !== 'http://localhost:3000') {
       return NextResponse.json({ error: 'Acesso bloqueado pelo Firewall local.' }, { status: 403, headers: corsHeaders });
     }
 
     const body: RequisicaoBusca = await request.json();
+// ... O resto do seu código continua EXATAMENTE igual daqui para baixo
     const { nome, codigo } = body;
 
     if (!nome) {
