@@ -1,5 +1,23 @@
 import { NextResponse } from 'next/server';
-import { chromium } from 'playwright';
+import { chromium } from 'playwright-extra';
+import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+
+// =========================================================================
+// FIREWALL DE SEGURANÇA (CORS)
+// Troque esta URL pelo link real da sua Vercel quando fizer o deploy
+// =========================================================================
+const DOMINIO_PERMITIDO = 'https://tcg-one-piece-five.vercel.app'; 
+
+const corsHeaders = {
+  'Access-Control-Allow-Origin': DOMINIO_PERMITIDO,
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type',
+};
+
+// Rota OPTIONS é exigida pelos navegadores para liberar requisições de outros domínios
+export async function OPTIONS() {
+  return NextResponse.json({}, { headers: corsHeaders });
+}
 
 interface RequisicaoBusca {
   nome: string;
@@ -8,33 +26,32 @@ interface RequisicaoBusca {
 
 export async function POST(request: Request) {
   try {
+    // Validação de segurança extra: Verifica se a origem da requisição é a sua Vercel
+    const origin = request.headers.get('origin') || '';
+    if (origin !== DOMINIO_PERMITIDO && origin !== 'http://localhost:3000') {
+      return NextResponse.json({ error: 'Acesso bloqueado pelo Firewall local.' }, { status: 403, headers: corsHeaders });
+    }
+
     const body: RequisicaoBusca = await request.json();
     const { nome, codigo } = body;
 
     if (!nome) {
-      return NextResponse.json({ error: 'O nome é obrigatório' }, { status: 400 });
+      return NextResponse.json({ error: 'O nome é obrigatório' }, { status: 400, headers: corsHeaders });
     }
 
-    const nomeLimpoParaBusca = nome
-      .replace(/\s*\(.*?\)\s*/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
+    const nomeLimpoParaBusca = nome.replace(/\s*\(.*?\)\s*/g, " ").replace(/\s+/g, " ").trim();
 
-    const termoBuscaFinal = nomeLimpoParaBusca;
+    chromium.use(StealthPlugin());
 
-    // =========================================================================
-    // DISFARCE DE ROBÔ E AJUSTE PRO DOCKER/RAILWAY
-    // =========================================================================
     const browser = await chromium.launch({ 
       headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled'] 
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled', '--disable-web-security'] 
     });
     
     const context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-      extraHTTPHeaders: {
-        'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
-      }
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      locale: 'pt-BR',
+      timezoneId: 'America/Sao_Paulo',
     });
     const page = await context.newPage();
 
@@ -47,7 +64,7 @@ export async function POST(request: Request) {
       }
     });
 
-    const termoUrl = encodeURIComponent(termoBuscaFinal);
+    const termoUrl = encodeURIComponent(nomeLimpoParaBusca);
     const listaFinal: { htmlRaw: string }[] = [];
     let numeroPagina = 1;
 
@@ -55,24 +72,14 @@ export async function POST(request: Request) {
       const urlBusca = `https://www.ligaonepiece.com.br/?view=cards/search&card=${termoUrl}&page=${numeroPagina}`;
       await page.goto(urlBusca, { waitUntil: 'domcontentloaded' });
 
-      // =========================================================================
-      // LOG DETETIVE: Vai aparecer nos logs do Railway pra gente saber onde ele parou
-      // =========================================================================
-      const tituloPagina = await page.title();
-      console.log(`[DEBUG] Página ${numeroPagina} carregada. Título: "${tituloPagina}"`);
-
       try {
-        // Aumentamos o limite para 8 segundos para compensar a velocidade da nuvem
         await page.waitForSelector('.price-min', { timeout: 8000 });
       } catch (e) {
-        console.log(`[DEBUG] Fim das páginas ou timeout atingido na página ${numeroPagina}.`);
         break; 
       }
 
       const mtgPrices = page.locator('.mtg-prices');
-      const blocosDeCarta = await mtgPrices.evaluateAll(elements => 
-        elements.map(el => el.parentElement?.innerHTML || "")
-      );
+      const blocosDeCarta = await mtgPrices.evaluateAll(elements => elements.map(el => el.parentElement?.innerHTML || ""));
 
       if (blocosDeCarta.length === 0) break;
 
@@ -80,16 +87,8 @@ export async function POST(request: Request) {
         if (!htmlBloco) continue;
         const textoLower = htmlBloco.toLowerCase();
 
-        if (!textoLower.includes(nomeLimpoParaBusca.toLowerCase())) {
-          continue; 
-        }
-
-        if (codigo) {
-          const codigoBuscado = codigo.toLowerCase().trim();
-          if (!textoLower.includes(codigoBuscado)) {
-            continue; 
-          }
-        }
+        if (!textoLower.includes(nomeLimpoParaBusca.toLowerCase())) continue; 
+        if (codigo && !textoLower.includes(codigo.toLowerCase().trim())) continue; 
 
         listaFinal.push({ htmlRaw: htmlBloco });
       }
@@ -102,10 +101,8 @@ export async function POST(request: Request) {
       return cartas.map(c => {
         const parser = new DOMParser();
         const doc = parser.parseFromString(c.htmlRaw, 'text/html');
-        
         const textoBloco = doc.body.innerText || "";
         const linhas = textoBloco.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-        
         const precoMin = doc.querySelector('.price-min')?.textContent?.trim() || "R$ --,--";
         
         const imgEl = doc.querySelector('img.main-card');
@@ -116,17 +113,17 @@ export async function POST(request: Request) {
         }
 
         const descricao = linhas.slice(0, 3).filter(l => !l.includes('R$')).join(' | ');
-
         return { descricao, preco: precoMin, imagem: urlImg };
       });
     }, listaFinal);
 
     await browser.close();
 
-    return NextResponse.json({ cartas: resultadosFormatados });
+    // Retorna os dados com os cabeçalhos de segurança para a Vercel aceitar
+    return NextResponse.json({ cartas: resultadosFormatados }, { headers: corsHeaders });
 
   } catch (error) {
     console.error(error);
-    return NextResponse.json({ error: 'Erro interno no servidor' }, { status: 500 });
+    return NextResponse.json({ error: 'Erro interno no servidor' }, { status: 500, headers: corsHeaders });
   }
 }
